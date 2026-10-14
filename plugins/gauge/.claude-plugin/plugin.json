@@ -1,0 +1,35 @@
+{
+  "name": "gauge",
+  "version": "0.1.0",
+  "description": "Шкала: заповнення контексту з кольором і прогнозом «скільки ходів до межі», ліміти 5 год і тижня з часом скидання, скільки ще живе кеш підказок; /gauge — з чого складається контекст",
+  "types": "./types/index.d.ts",
+  "author": {
+    "name": "Sofilkanych"
+  },
+  "license": "MIT",
+  "userConfig": {
+    "warnAt": {
+      "type": "number",
+      "title": "Жовтий з, %",
+      "description": "З якого заповнення контексту шкала жовтіє",
+      "default": 70,
+      "min": 30,
+      "max": 95
+    },
+    "alertAt": {
+      "type": "number",
+      "title": "Червоний з, %",
+      "description": "З якого заповнення шкала червоніє і один раз показує сповіщення",
+      "default": 90,
+      "min": 50,
+      "max": 99
+    },
+    "cacheTtl": {
+      "type": "string",
+      "title": "Скільки живе кеш підказок",
+      "description": "5m — звичайний кеш, 1h — годинний (як у підписці Claude)",
+      "options": ["5m", "1h"],
+      "default": "1h"
+    }
+  }
+}
