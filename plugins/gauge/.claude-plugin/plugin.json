@@ -1,6 +1,6 @@
 {
   "name": "gauge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Шкала: заповнення контексту з кольором і прогнозом «скільки ходів до межі», ліміти 5 год і тижня з часом скидання, скільки ще живе кеш підказок; /gauge — з чого складається контекст",
   "types": "./types/index.d.ts",
   "author": {
@@ -28,8 +28,21 @@
       "type": "string",
       "title": "Скільки живе кеш підказок",
       "description": "5m — звичайний кеш, 1h — годинний (як у підписці Claude)",
-      "options": ["5m", "1h"],
+      "options": [
+        "5m",
+        "1h"
+      ],
       "default": "1h"
+    },
+    "position": {
+      "type": "string",
+      "title": "Де показувати шкалу",
+      "description": "below — під полем вводу, above — над ним",
+      "options": [
+        "below",
+        "above"
+      ],
+      "default": "below"
     }
   }
 }

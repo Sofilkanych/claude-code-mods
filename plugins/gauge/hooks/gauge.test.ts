@@ -39,17 +39,26 @@ function world(on: On, opts: { surfaces?: string[]; env?: Record<string, string>
     const { Box } = $.ui.resolve(e)
     return h(Box, {}) as any
   })
+  // Рядок підказок рушія під полем вводу
+  on('ui.render', { component: 'PromptHint' }, async ($, e) => {
+    const { Box } = $.ui.resolve(e)
+    return h(Box, { key: 'engine-hint' }) as any
+  })
   return { st, toasts, clock }
 }
 
 const BAND = { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 160 } as any
+const HINT = { isDraft: false, isWorking: false, hint: '? for shortcuts' } as any
 const start = ($: any) => $.session.start({ cwd: '/p', surface: null, isInteractive: false } as any)
 const USAGE = { inputTokens: 1000, outputTokens: 100 }
 const done = ($: any, extra: object = {}) =>
   $.turn.complete({ turnId: 't', answer: '', durationMs: 1000, isAborted: false, reason: 'answer', text: '', usage: USAGE, ...extra } as any)
 // Увесь рядок смуги — тексти по порядку
+// Ширину рядок під полем бере з останнього малювання смуги над полем — тож спершу малюємо її з потрібною шириною
 const line = async ($: any, surface: 'terminal' | 'desktop' = 'desktop', props = BAND) => {
-  const ui = await $.ui.mount({ plugin: 'gauge', surface, component: 'AbovePrompt', props })
+  await $.ui.mount({ plugin: 'gauge', surface, component: 'AbovePrompt', props })
+  if (props.hasSurvey) return { ui: null as any, text: '' }
+  const ui = await $.ui.mount({ plugin: 'gauge', surface, component: 'PromptHint', props: HINT })
   const texts = (await ui.findAll({ type: 'Text' })).map((t: any) => t.text)
   return { ui, text: texts.join(' ') }
 }
@@ -268,7 +277,28 @@ describe('шкала', () => {
     expect(text).toContain('тиждень 18%')
   })
 
-  test('ліміти: колір, дробові відсотки з комою, невідомий вид', async ($, on) => {
+  test('за замовчуванням — під полем вводу, рядок підказок рушія лишається; над полем — порожньо', async ($, on) => {
+    world(on)
+    await start($)
+    await done($)
+    const above = await $.ui.mount({ plugin: 'gauge', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+    expect(await above.find({ type: 'Text', text: /40%$/ })).toBeUndefined()
+    const hint = await $.ui.mount({ plugin: 'gauge', surface: 'desktop', component: 'PromptHint', props: HINT })
+    expect(await hint.find({ type: 'Text', text: /40%$/ })).toBeDefined()
+    expect(await hint.find({ type: 'Box', key: 'engine-hint' })).toBeDefined()
+  })
+
+  test('налаштування «above» — над полем вводу, як раніше', { options: { position: 'above' } } as any, async ($: any, on: any) => {
+    world(on)
+    await start($)
+    await done($)
+    const above = await $.ui.mount({ plugin: 'gauge', surface: 'desktop', component: 'AbovePrompt', props: BAND })
+    expect(await above.find({ type: 'Text', text: /40%$/ })).toBeDefined()
+    const hint = await $.ui.mount({ plugin: 'gauge', surface: 'desktop', component: 'PromptHint', props: HINT })
+    expect(await hint.find({ type: 'Text', text: /40%$/ })).toBeUndefined()
+  })
+
+  test('ліміти: приглушені, дробові відсотки з комою, невідомий вид', async ($, on) => {
     const { st } = world(on)
     st.limits = [
       { kind: 'five_hour', percentUsed: 95, resetsAt: new Date(2026, 9, 14, 12, 0).toISOString() },
@@ -279,8 +309,9 @@ describe('шкала', () => {
     await done($)
     const { ui, text } = await line($)
     expect(text).toContain('5 год 95% (до 12:00) · бюджет 104,5% · ліміт weird 75%')
-    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.color).toBe('red')
-    expect((await ui.find({ type: 'Text', text: /^ліміт weird/ }))?.props?.color).toBe('yellow')
+    // Ліміти — приглушені, як прогноз
+    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.dimColor).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.color).toBeUndefined()
   })
 
   test('десктоп без поверхні — годинник іде; вкладений claude -p з десктопа — ні', async ($, on) => {
@@ -350,9 +381,9 @@ describe('розрахунки', () => {
   })
 
   test('налаштування: межі й червоний вище за жовтий', () => {
-    expect(config({})).toEqual({ warnAt: 70, alertAt: 90, ttlMs: 60 * MIN })
-    expect(config({ warnAt: 80, alertAt: 60, cacheTtl: '5m' })).toEqual({ warnAt: 80, alertAt: 81, ttlMs: 5 * MIN })
-    expect(config({ warnAt: 5, alertAt: 200 })).toEqual({ warnAt: 30, alertAt: 99, ttlMs: 60 * MIN })
+    expect(config({})).toEqual({ warnAt: 70, alertAt: 90, ttlMs: 60 * MIN, position: 'below' })
+    expect(config({ warnAt: 80, alertAt: 60, cacheTtl: '5m', position: 'above' })).toEqual({ warnAt: 80, alertAt: 81, ttlMs: 5 * MIN, position: 'above' })
+    expect(config({ warnAt: 5, alertAt: 200, position: 'збоку' })).toEqual({ warnAt: 30, alertAt: 99, ttlMs: 60 * MIN, position: 'below' })
   })
 
   test('рядок вміщується в ширину: спершу зникає час скидання тижня, потім прогноз і шкала', () => {

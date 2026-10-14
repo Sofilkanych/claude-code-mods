@@ -16,11 +16,9 @@ const TICK_MS = 15_000
 const HISTORY = 7
 const BAR = 10
 const DAY = 24 * 60 * 60_000
-// Ліміти жовтіють і червоніють за сталими межами (вони не про контекст, тож налаштування контексту їх не чіпають)
-const LIMIT_WARN = 70
-const LIMIT_ALERT = 90
 
-type Config = { warnAt: number; alertAt: number; ttlMs: number }
+// position: де рядок — під полем вводу (рядок підказок) чи над ним
+type Config = { warnAt: number; alertAt: number; ttlMs: number; position: 'below' | 'above' }
 
 export function config(options: any): Config {
   const num = (v: unknown, d: number, lo: number, hi: number) => {
@@ -29,7 +27,7 @@ export function config(options: any): Config {
   }
   const warnAt = num(options?.warnAt, 70, 30, 95)
   const alertAt = Math.max(warnAt + 1, num(options?.alertAt, 90, 50, 99))
-  return { warnAt, alertAt, ttlMs: options?.cacheTtl === '5m' ? 5 * 60_000 : 60 * 60_000 }
+  return { warnAt, alertAt, ttlMs: options?.cacheTtl === '5m' ? 5 * 60_000 : 60 * 60_000, position: options?.position === 'above' ? 'above' : 'below' }
 }
 
 // ——— розрахунки ————————————————————————————————————————————————————————
@@ -120,7 +118,7 @@ export function parts(r: Reading, hist: number[], nowMs: number, c: Config, deta
   for (const l of r.limits.filter(x => isCurrent(x, nowMs))) {
     const showReset = detail >= 3 || (detail >= 2 && l.kind === 'five_hour')
     const reset = showReset ? resetText(l.resetsAt, nowMs) : ''
-    out.push({ key: `l-${l.kind}`, text: `${limitName(l.kind)} ${pct(l.percent)}${reset ? ` (${reset})` : ''}`, color: levelColor(l.percent, LIMIT_WARN, LIMIT_ALERT) })
+    out.push({ key: `l-${l.kind}`, text: `${limitName(l.kind)} ${pct(l.percent)}${reset ? ` (${reset})` : ''}`, dim: true })
   }
   const cache = cacheLeft(r.answeredAt, nowMs, c.ttlMs)
   if (cache) out.push({ key: 'cache', text: `кеш ${cache.text}`, color: cache.isLow ? 'yellow' : undefined, dim: !cache.isLow })
@@ -249,6 +247,24 @@ async function details($: any, c: Config): Promise<string> {
   return lines.join('\n')
 }
 
+// Ширина рядка: рядок під полем вводу її не знає — беремо з останнього малювання смуги над полем
+let columns = 120
+
+// Сам рядок шкали; null — показати нічого
+async function drawRow($: any, e: any, c: Config, cols: number): Promise<any> {
+  const r = await read($, reading)
+  const t = Math.max(await read($, now), r.answeredAt)
+  const ps = fit(r, await read($, history), t, c, Math.max(20, cols - 2))
+  if (!ps.length) return null
+  const { Box, Text } = $.ui.resolve(e)
+  const row: any[] = []
+  ps.forEach((p, i) => {
+    if (i) row.push(<Text key={`s${i}`} dimColor>·</Text>)
+    row.push(<Text key={p.key} color={p.color} dimColor={p.dim}>{p.text}</Text>)
+  })
+  return <Box key="gauge" gap={1}>{row}</Box>
+}
+
 // Нове вікно (/clear, /resume) — стара історія, кеш і сповіщення до нього не стосуються
 async function resetWindow($: any): Promise<void> {
   await update($, reading, r => ({ ...r, percent: null, tokens: null, answeredAt: 0 }))
@@ -314,23 +330,33 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // Над полем вводу — лише коли так налаштовано; заодно запам'ятовуємо ширину для рядка під полем
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const below = await next(e)
-    if (e.props.hasSurvey) return below
-    const r = await read($, reading)
-    const t = Math.max(await read($, now), r.answeredAt)
-    const ps = fit(r, await read($, history), t, c, Math.max(20, (e.props.bodyColumns ?? 120) - 2))
-    if (!ps.length) return below
-    const { Box, Text } = $.ui.resolve(e)
-    const row: any[] = []
-    ps.forEach((p, i) => {
-      if (i) row.push(<Text key={`s${i}`} dimColor>·</Text>)
-      row.push(<Text key={p.key} color={p.color} dimColor={p.dim}>{p.text}</Text>)
-    })
+    if (typeof e.props.bodyColumns === 'number') columns = e.props.bodyColumns
+    if (c.position !== 'above' || e.props.hasSurvey) return below
+    const row = await drawRow($, e, c, columns)
+    if (!row) return below
+    const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="column">
-        <Box gap={1}>{row}</Box>
+        {row}
         {below}
+      </Box>
+    )
+  })
+
+  // Під полем вводу: рядок підказок рушія лишається, шкала — під ним
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    const engine = await next(e)
+    if (c.position !== 'below') return engine
+    const row = await drawRow($, e, c, columns)
+    if (!row) return engine
+    const { Box } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="column">
+        {engine}
+        {row}
       </Box>
     )
   })
