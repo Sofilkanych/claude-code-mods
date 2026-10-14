@@ -298,22 +298,26 @@ describe('шкала', () => {
     expect(await hint.find({ type: 'Text', text: /40%$/ })).toBeUndefined()
   })
 
-  test('ліміти: з 90% червоні, нижче приглушені, дробові відсотки з комою, невідомий вид', async ($, on) => {
+  test('ліміти: з 90% червоні, з 70% жовті, нижче приглушені, дробові відсотки з комою, невідомий вид', async ($, on) => {
     const { st } = world(on)
     st.limits = [
       { kind: 'five_hour', percentUsed: 95, resetsAt: new Date(2026, 9, 14, 12, 0).toISOString() },
       { kind: 'spend_limit', percentUsed: 104.5 },
       { kind: 'weird', percentUsed: 75 },
+      { kind: 'seven_day', percentUsed: 69 },
     ]
     await start($)
     await done($)
     const { ui, text } = await line($)
-    expect(text).toContain('5 год 95% (до 12:00) · бюджет 104,5% · ліміт weird 75%')
-    // З 90% ліміт червоний; нижче — приглушений, як прогноз
-    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.color).toBe('red')
-    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.dimColor).toBeFalsy()
-    expect((await ui.find({ type: 'Text', text: /^ліміт weird/ }))?.props?.dimColor).toBe(true)
-    expect((await ui.find({ type: 'Text', text: /^ліміт weird/ }))?.props?.color).toBeUndefined()
+    expect(text).toContain('5 год 95% (до 12:00) · бюджет 104,5% · ліміт weird 75% · тиждень 69%')
+    // З 90% ліміт червоний, з 70% — жовтий; нижче — приглушений, як прогноз
+    const at = async (re: RegExp) => (await ui.find({ type: 'Text', text: re }))?.props
+    expect((await at(/^5 год/))?.color).toBe('red')
+    expect((await at(/^5 год/))?.dimColor).toBeFalsy()
+    expect((await at(/^ліміт weird/))?.color).toBe('yellow')
+    expect((await at(/^ліміт weird/))?.dimColor).toBeFalsy()
+    expect((await at(/^тиждень/))?.dimColor).toBe(true)
+    expect((await at(/^тиждень/))?.color).toBeUndefined()
   })
 
   test('десктоп без поверхні — годинник іде; вкладений claude -p з десктопа — ні', async ($, on) => {
