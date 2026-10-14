@@ -21,16 +21,24 @@ const JOB_TTL_MS = 60 * 60_000
 
 // ——— допоміжне ——————————————————————————————————————————————————————————
 
-function clampThreshold(value: unknown): number {
+export function clampThreshold(value: unknown): number {
   const n = Number(value)
   if (!Number.isFinite(n)) return DEFAULT_THRESHOLD
   return Math.min(95, Math.max(50, Math.round(n)))
 }
 
-// Назва теки проєкту для шляху: без розділювачів і керівних символів
+// Короткий відбиток повного шляху: проєкти з однаковою назвою теки не змішуються
+function shortHash(text: string): string {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0
+  return h.toString(16).padStart(8, '0').slice(0, 6)
+}
+
+// Тека документів проєкту: назва теки без розділювачів і керівних символів + відбиток повного шляху
 export function folderName(root: string): string {
-  const base = root.replace(/\/+$/, '').split('/').pop() || 'без-назви'
-  return base.replace(/[\u0000-\u001f\u007f\\/:*?"<>|`]/g, '_').slice(0, 80)
+  const clean = root.replace(/\/+$/, '')
+  const base = clean.split('/').pop() || 'без-назви'
+  return `${base.replace(/[\u0000-\u001f\u007f\\/:*?"<>|`]/g, '_').slice(0, 80)}-${shortHash(clean)}`
 }
 
 function stamp(ms: number): string {
@@ -48,14 +56,22 @@ async function run($: any, argv: string[]): Promise<string> {
   }
 }
 
-// Стан репозиторію, щоб Claude не забув про незакомічене. Не git — порожньо
+// Стан репозиторію, щоб Claude не забув про незакомічене. Не git — порожньо.
+// core.quotePath=false — щоб кирилиця в назвах файлів не перетворювалась на \320\267…
 async function gitFacts($: any, root: string): Promise<string> {
-  const status = await run($, ['git', '--no-optional-locks', '-C', root, 'status', '--short', '--branch'])
+  const git = ['git', '-c', 'core.quotePath=false', '--no-optional-locks', '-C', root]
+  const status = await run($, [...git, 'status', '--short', '--branch'])
   if (!status) return ''
-  const log = await run($, ['git', '--no-optional-locks', '-C', root, 'log', '--oneline', '-5'])
+  const log = await run($, [...git, 'log', '--oneline', '-5'])
   const lines = status.split('\n')
   const shown = lines.slice(0, 40).join('\n') + (lines.length > 40 ? `\n… і ще ${lines.length - 40}` : '')
   return [`git status:`, shown, ...(log ? [`Останні коміти:`, log] : [])].join('\n')
+}
+
+async function docsDir($: any): Promise<string | null> {
+  const root: string = await $.session.root()
+  const home = String((await $.env.get('HOME')) ?? '').replace(/\/+$/, '')
+  return home ? `${home}/.claude/relay/${folderName(root)}` : null
 }
 
 // ——— тексти для Claude —————————————————————————————————————————————————
@@ -87,27 +103,78 @@ export function resumeText(file: string): string {
 
 // ——— передача ——————————————————————————————————————————————————————————
 
+// Прапорці ставляться синхронно, до першого await: два натискання поспіль не запустять дві передачі
 let isStarting = false
+// /relay відповів і передача ось-ось стартує
+let isQueued = false
+let ttlTimer: { cancel: () => void } | undefined
+
+async function cancelJob($: any, why: string): Promise<void> {
+  ttlTimer?.cancel()
+  ttlTimer = undefined
+  await update($, job, () => null)
+  $.ui.toast(why, { timeoutMs: 8000 })
+}
+
+// Таймер «за годину без документа — забути». Після гарячого перезавантаження ставиться знову на залишок часу
+async function armTtl($: any, j: Job): Promise<void> {
+  ttlTimer?.cancel()
+  const now: number = await $.clock.now()
+  ttlTimer = $.clock.after(Math.max(1, j.at + JOB_TTL_MS - now), () => {
+    void read($, job).then(cur => (cur?.file === j.file ? cancelJob($, 'Передачу скасовано: за годину документ так і не з\'явився.') : undefined)).catch(() => {})
+  })
+}
 
 // Крок 1: просимо Claude написати документ
 async function start($: any): Promise<string> {
-  if (isStarting || (await read($, job))) return 'Передача вже йде: чекаю на документ від Claude.'
+  if (isStarting) return 'Передача вже йде: чекаю на документ від Claude.'
   isStarting = true
+  isQueued = false
   try {
+    if (await read($, job)) return 'Передача вже йде: чекаю на документ від Claude.'
+    const dir = await docsDir($)
+    if (!dir) return 'Не знайшов домашню теку — передачу не розпочато.'
     const root: string = await $.session.root()
-    const home = String((await $.env.get('HOME')) ?? '').replace(/\/+$/, '')
-    if (!home) return 'Не знайшов домашню теку — передачу не розпочато.'
-    const dir = `${home}/.claude/relay/${folderName(root)}`
     const now: number = await $.clock.now()
     const file = `${dir}/relay-${stamp(now)}.md`
     await run($, ['mkdir', '-p', dir])
     const facts = await gitFacts($, root)
     await update($, job, () => ({ file, at: now }))
     await update($, snoozedAt, () => null)
-    await $.prompt.submit({ text: writeText(file, facts) })
+    try {
+      await $.prompt.submit({ text: writeText(file, facts) })
+    } catch (err: any) {
+      // Прохання не дійшло до Claude — не лишаємо смугу «пише документ» висіти
+      await update($, job, () => null)
+      return `Не вдалося попросити Claude написати документ: ${String(err?.message ?? err).slice(0, 80)}`
+    }
+    // Claude так і не відповів документом — через годину передача забувається сама
+    await armTtl($, { file, at: now })
     return `Передачу розпочато: Claude пише документ у ${file}.`
   } finally {
     isStarting = false
+  }
+}
+
+// Почати передачу і сказати, якщо не вийшло
+async function startAndReport($: any): Promise<void> {
+  try {
+    const msg = await start($)
+    if (!msg.startsWith('Передачу розпочато')) $.ui.toast(msg, { timeoutMs: 8000 })
+  } catch (err: any) {
+    isQueued = false
+    ttlTimer?.cancel()
+    try { await update($, job, () => null) } catch {}
+    $.ui.toast(`Передачу не розпочато: ${String(err?.message ?? err).slice(0, 80)}`, { timeoutMs: 8000 })
+  }
+}
+
+async function docSize($: any, file: string): Promise<number> {
+  try {
+    const st = await $.fs.stat(file)
+    return st?.kind === 'file' ? st.size ?? 0 : 0
+  } catch {
+    return 0
   }
 }
 
@@ -115,68 +182,91 @@ async function start($: any): Promise<string> {
 async function finish($: any, reason: string): Promise<void> {
   const j = await read($, job)
   if (!j) return
-  const now: number = await $.clock.now()
-  if (reason === 'aborted' || reason === 'error' || now - j.at > JOB_TTL_MS) {
+  const size = await docSize($, j.file)
+  // Поки читали диск, передачу могли скасувати — тоді нічого не робимо
+  if ((await read($, job))?.file !== j.file) return
+  // Документ записано — передаємо, навіть якщо хід потім обірвався (при повному контексті це найімовірніше)
+  if (size >= MIN_DOC_BYTES) {
+    ttlTimer?.cancel()
+    ttlTimer = undefined
     await update($, job, () => null)
-    $.ui.toast('Передачу скасовано: хід перервано. Сесію не очищено.', { timeoutMs: 8000 })
+    try {
+      await $.command.run({ command: 'clear', args: '' })
+      await update($, percent, () => null)
+      await update($, snoozedAt, () => null)
+      await $.prompt.submit({ text: resumeText(j.file) })
+    } catch (err: any) {
+      $.ui.toast(`Не вдалося перейти в чисте вікно: ${String(err?.message ?? err).slice(0, 80)}. Документ: ${j.file}`, { timeoutMs: 10000 })
+    }
     return
   }
-  let size = 0
-  try {
-    const st = await $.fs.stat(j.file)
-    if (st?.kind === 'file') size = st.size ?? 0
-  } catch {}
-  // Документ ще не записано: можливо, Claude щось уточнює — чекаємо наступного ходу
-  if (size === 0) return
-  await update($, job, () => null)
-  if (size < MIN_DOC_BYTES) {
-    $.ui.toast(`Документ передачі закороткий (${size} Б) — сесію не очищено. Перевірте ${j.file}`, { timeoutMs: 10000 })
+  if (size > 0) {
+    await cancelJob($, `Документ передачі закороткий (${size} Б) — сесію не очищено. Перевірте ${j.file}`)
     return
   }
-  try {
-    await $.command.run({ command: 'clear', args: '' })
-    await update($, percent, () => null)
-    await $.prompt.submit({ text: resumeText(j.file) })
-  } catch (err: any) {
-    $.ui.toast(`Не вдалося перейти в чисте вікно: ${String(err?.message ?? err).slice(0, 80)}. Документ: ${j.file}`, { timeoutMs: 10000 })
-  }
+  const now: number = await $.clock.now()
+  if (reason === 'aborted') return cancelJob($, 'Передачу скасовано: хід перервано. Сесію не очищено.')
+  if (reason === 'error') return cancelJob($, 'Передачу скасовано: хід закінчився помилкою, документа немає. Сесію не очищено.')
+  if (now - j.at > JOB_TTL_MS) return cancelJob($, 'Передачу скасовано: за годину документ так і не з\'явився.')
+  // Документа ще немає: можливо, Claude щось уточнює — чекаємо наступного ходу
 }
 
-async function refreshPercent($: any): Promise<void> {
+async function refreshPercent($: any, threshold: number): Promise<void> {
   try {
     const { context } = await $.session.usage()
     const p = typeof context?.percent === 'number' ? context.percent : null
     await update($, percent, () => p)
+    // Заповнення впало нижче порога (/compact, /clear) — «Пізніше» своє відслужило
+    if (p !== null && p < threshold) await update($, snoozedAt, () => null)
   } catch {}
 }
 
 // Список документів передачі цього проєкту, найновіші вгорі
 async function listDocs($: any): Promise<string> {
-  const root: string = await $.session.root()
-  const home = String((await $.env.get('HOME')) ?? '').replace(/\/+$/, '')
-  const dir = `${home}/.claude/relay/${folderName(root)}`
-  let items: { name: string; kind: string; size: number; mtimeMs: number }[] = []
+  const dir = await docsDir($)
+  let items: { name: string; kind: string }[] = []
   try {
-    items = (await $.fs.list(dir)) ?? []
+    if (dir) items = (await $.fs.list(dir)) ?? []
   } catch {}
   const docs = items.filter(i => i.kind === 'file' && /^relay-\d{8}-\d{6}\.md$/.test(i.name)).sort((a, b) => b.name.localeCompare(a.name))
   if (!docs.length) return 'Для цього проєкту документів передачі ще немає.'
   return [`Документи передачі (${docs.length}), найновіші вгорі:`, ...docs.slice(0, 15).map(d => `- ${dir}/${d.name}`)].join('\n')
 }
 
+const HELP = 'Естафета: /relay — передати роботу в чисте вікно зараз; /relay список — документи передачі; /relay скасувати — скасувати передачу, що йде.'
+
 export const register: Register = (on, options) => {
   const threshold = clampThreshold(options?.threshold)
 
   on('session.start', async ($, e, next) => {
-    await $.command.register({ name: 'relay', description: 'Естафета: передати роботу в чисте вікно зараз; «/relay список» — документи передачі' })
-    void refreshPercent($)
+    await $.command.register({ name: 'relay', description: 'Естафета: передати роботу в чисте вікно; «список» — документи передачі; «скасувати» — скасувати' })
+    void refreshPercent($, threshold)
+    // Гаряче перезавантаження мода: передача в стані лишилась, а таймер — ні
+    void read($, job).then(j => (j ? armTtl($, j) : undefined)).catch(() => {})
+    return next(e)
+  })
+
+  // /clear вручну: старе заповнення й «Пізніше» до нового вікна не стосуються
+  on('session.end', async ($, e, next) => {
+    if ((e as any).reason === 'clear') {
+      try {
+        await update($, percent, () => null)
+        await update($, snoozedAt, () => null)
+        // Власний /clear мода обнуляє передачу ще до очищення; якщо вона ще є — це ручний /clear: тихо забуваємо
+        ttlTimer?.cancel()
+        ttlTimer = undefined
+        await update($, job, () => null)
+      } catch {}
+    }
     return next(e)
   })
 
   on('turn.complete', async ($, e, next) => {
     const r = await next(e)
+    // Хід субагента — не кінець ходу основного Claude: ні заповнення, ні передачі він не стосується
+    if ((e as any).agentId) return r
     try {
-      await refreshPercent($)
+      await refreshPercent($, threshold)
       await finish($, (e as any).reason)
     } catch {}
     return r
@@ -185,14 +275,17 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'relay' }, async ($, e) => {
     const args = String((e as any).args ?? '').trim()
     if (/^(список|list)$/i.test(args)) return { text: await listDocs($) }
-    if (isStarting || (await read($, job))) return { text: 'Передача вже йде: чекаю на документ від Claude.' }
+    if (/^(скасувати|cancel)$/i.test(args)) {
+      if (!(await read($, job))) return { text: 'Передачі, що йде, немає.' }
+      await cancelJob($, 'Передачу скасовано. Сесію не очищено.')
+      return { text: 'Передачу скасовано.' }
+    }
+    if (args) return { text: `Не знаю «${args.slice(0, 40)}». ${HELP}` }
+    if (isStarting || isQueued || (await read($, job))) return { text: 'Передача вже йде: чекаю на документ від Claude.' }
     // З обробника команди рушій не дає надсилати повідомлення Claude (він чекав би сам на себе) —
     // тож передачу запускаємо окремо, щойно команда відповіла
-    $.clock.after(1, () => {
-      void start($).then(msg => {
-        if (!msg.startsWith('Передачу розпочато')) $.ui.toast(msg, { timeoutMs: 8000 })
-      })
-    })
+    isQueued = true
+    $.clock.after(1, () => void startAndReport($))
     return { text: 'Естафета: прошу Claude написати документ передачі…' }
   })
 
@@ -203,7 +296,12 @@ export const register: Register = (on, options) => {
     if (await read($, job)) {
       return (
         <Box flexDirection="column">
-          <Text color="cyan" wrap="truncate-end">✍️ Естафета: Claude пише документ передачі…</Text>
+          <Box flexWrap="wrap" gap={1}>
+            <Box flexShrink={1}>
+              <Text color="cyan" wrap="truncate-end">✍️ Естафета: Claude пише документ передачі…</Text>
+            </Box>
+            <Button key="cancel" label="Скасувати" onPress={() => void cancelJob($, 'Передачу скасовано. Сесію не очищено.')} />
+          </Box>
           {below}
         </Box>
       )
@@ -219,7 +317,7 @@ export const register: Register = (on, options) => {
             <Text color="yellow" wrap="truncate-end">{`🔁 Контекст заповнено на ${p}% — передати роботу в чисте вікно?`}</Text>
           </Box>
           <Box gap={1}>
-            <Button key="relay" label="Передати" onPress={() => void start($)} />
+            <Button key="relay" label="Передати" onPress={() => void startAndReport($)} />
             <Button key="later" label="Пізніше" onPress={() => update($, snoozedAt, () => p)} />
           </Box>
         </Box>
