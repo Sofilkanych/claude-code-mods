@@ -17,6 +17,9 @@ const HISTORY = 7
 const BAR = 10
 const DAY = 24 * 60 * 60_000
 
+// Ліміт з цього відсотка — червоний як попередження; нижче — приглушений, як прогноз
+const LIMIT_ALERT = 90
+
 // position: де рядок — під полем вводу (рядок підказок) чи над ним
 type Config = { warnAt: number; alertAt: number; ttlMs: number; position: 'below' | 'above' }
 
@@ -118,7 +121,7 @@ export function parts(r: Reading, hist: number[], nowMs: number, c: Config, deta
   for (const l of r.limits.filter(x => isCurrent(x, nowMs))) {
     const showReset = detail >= 3 || (detail >= 2 && l.kind === 'five_hour')
     const reset = showReset ? resetText(l.resetsAt, nowMs) : ''
-    out.push({ key: `l-${l.kind}`, text: `${limitName(l.kind)} ${pct(l.percent)}${reset ? ` (${reset})` : ''}`, dim: true })
+    out.push({ key: `l-${l.kind}`, text: `${limitName(l.kind)} ${pct(l.percent)}${reset ? ` (${reset})` : ''}`, ...(l.percent >= LIMIT_ALERT ? { color: 'red' } : { dim: true }) })
   }
   const cache = cacheLeft(r.answeredAt, nowMs, c.ttlMs)
   if (cache) out.push({ key: 'cache', text: `кеш ${cache.text}`, color: cache.isLow ? 'yellow' : undefined, dim: !cache.isLow })

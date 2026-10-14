@@ -298,7 +298,7 @@ describe('шкала', () => {
     expect(await hint.find({ type: 'Text', text: /40%$/ })).toBeUndefined()
   })
 
-  test('ліміти: приглушені, дробові відсотки з комою, невідомий вид', async ($, on) => {
+  test('ліміти: з 90% червоні, нижче приглушені, дробові відсотки з комою, невідомий вид', async ($, on) => {
     const { st } = world(on)
     st.limits = [
       { kind: 'five_hour', percentUsed: 95, resetsAt: new Date(2026, 9, 14, 12, 0).toISOString() },
@@ -309,9 +309,11 @@ describe('шкала', () => {
     await done($)
     const { ui, text } = await line($)
     expect(text).toContain('5 год 95% (до 12:00) · бюджет 104,5% · ліміт weird 75%')
-    // Ліміти — приглушені, як прогноз
-    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.dimColor).toBe(true)
-    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.color).toBeUndefined()
+    // З 90% ліміт червоний; нижче — приглушений, як прогноз
+    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.color).toBe('red')
+    expect((await ui.find({ type: 'Text', text: /^5 год/ }))?.props?.dimColor).toBeFalsy()
+    expect((await ui.find({ type: 'Text', text: /^ліміт weird/ }))?.props?.dimColor).toBe(true)
+    expect((await ui.find({ type: 'Text', text: /^ліміт weird/ }))?.props?.color).toBeUndefined()
   })
 
   test('десктоп без поверхні — годинник іде; вкладений claude -p з десктопа — ні', async ($, on) => {
